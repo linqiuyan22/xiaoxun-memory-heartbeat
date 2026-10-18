@@ -1,0 +1,6 @@
+workbench/*.py text eol=lf
+workbench/**/*.py text eol=lf
+workbench/*.md text eol=lf
+workbench/**/*.md text eol=lf
+workbench/*.json text eol=lf
+workbench/**/*.json text eol=lf

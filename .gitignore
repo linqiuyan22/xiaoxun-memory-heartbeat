@@ -1,0 +1,9 @@
+run-logs/
+first-run.txt
+
+worktree/
+
+# Production-derived run state (never publish)
+workbench/HEARTBEAT-RESULT.json
+workbench/RUNLOG.md
+
