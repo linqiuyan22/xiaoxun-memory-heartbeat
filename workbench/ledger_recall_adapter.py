@@ -14,6 +14,7 @@ import sqlite3
 from pathlib import Path
 
 from selector_filters import classify_row as _selector_classify
+from supersession import index as _supersession_index
 
 
 DB_PATH = Path(__file__).resolve().with_name("ledger.db")
@@ -70,6 +71,9 @@ def search(query: str, limit: int = 6) -> list[dict]:
             continue
         filtered.append((ts, source, actor, visibility, content, eid,
                          source_id, kind, meta))
+    superseded_by = _supersession_index({
+        "event_id": eid, "metadata_json": meta
+    } for _, _, _, _, _, eid, _, _, meta in filtered)
     scored = []
     ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
                                 "abcdefghijklmnopqrstuvwxyz")
@@ -83,11 +87,14 @@ def search(query: str, limit: int = 6) -> list[dict]:
         actor_score = 1 if actor in ("yanyan", "xiaoxun") else 0
         # Keep system/OCR events queryable but do not let an OCR transcription
         # outrank the actual people who said the matching words.
-        scored.append((hit, actor_score, str(ts), source, actor, visibility, text, eid,
-                       source_id, kind, meta))
-    scored.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+        # An old event remains evidence, but an explicit replacement takes
+        # precedence for a current-fact question.  Nothing else can demote it.
+        current_score = 0 if eid in superseded_by else 1
+        scored.append((current_score, hit, actor_score, str(ts), source, actor,
+                       visibility, text, eid, source_id, kind, meta))
+    scored.sort(key=lambda row: (row[0], row[1], row[2], row[3]), reverse=True)
     result = []
-    for _, _, ts, source, actor, visibility, text, eid, source_id, kind, meta in scored[:limit]:
+    for _, _, _, ts, source, actor, visibility, text, eid, source_id, kind, meta in scored[:limit]:
         result.append({
             "ts": ts,
             "part": "ledger",
@@ -97,6 +104,8 @@ def search(query: str, limit: int = 6) -> list[dict]:
             "source_id": source_id,
             "kind": kind,
             "metadata_json": meta,
+            "fact_status": "superseded" if eid in superseded_by else "current_or_unresolved",
+            "superseded_by": list(superseded_by.get(eid, ())),
         })
     return result
 

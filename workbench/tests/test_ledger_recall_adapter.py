@@ -91,6 +91,54 @@ class CandidateWindowTest(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_only_explicit_correction_demotes_old_fact_without_erasing_it(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix="synthetic-recall-", dir=root) as directory:
+            db_path = Path(directory) / "synthetic.db"
+            db = ledger_cli.connect(db_path)
+            try:
+                original_id = ledger_cli.event_id("cc", "original")
+                rows = [
+                    dict(source="cc", source_id="original", conversation_id="synthetic-thread",
+                         ts="2026-01-01T00:00:00Z", actor="yanyan", kind="message",
+                         visibility="normal", content="alpha room is blue"),
+                    # A reply and a newer unlinked statement are both evidence,
+                    # never automatic proof that the original is obsolete.
+                    dict(source="cc", source_id="reply", conversation_id="synthetic-thread",
+                         ts="2026-01-02T00:00:00Z", actor="yanyan", kind="message",
+                         visibility="normal", content="alpha room needs repainting", reply_to="original"),
+                    dict(source="cc", source_id="unlinked", conversation_id="synthetic-thread",
+                         ts="2026-01-03T00:00:00Z", actor="yanyan", kind="message",
+                         visibility="normal", content="alpha room has a red curtain"),
+                    dict(source="cc", source_id="correction", conversation_id="synthetic-thread",
+                         ts="2026-01-04T00:00:00Z", actor="yanyan", kind="message",
+                         visibility="normal", content="alpha correction: room is green",
+                         metadata={"supersedes_event_ids": [original_id]}),
+                ]
+                self.assertEqual(ledger_cli.ingest_rows(db, rows)["added"], 4)
+                classify = functools.partial(selector_filters.classify_row,
+                                             quarantine={"source_ids": set(), "event_ids": set()})
+                with patch.object(recall, "DB_PATH", db_path), patch.object(
+                    recall, "_selector_classify", classify
+                ):
+                    result = recall.search("alpha room", limit=6)
+                by_source = {row["source_id"]: row for row in result}
+                self.assertEqual(set(by_source), {"original", "reply", "unlinked", "correction"})
+                self.assertEqual(by_source["original"]["fact_status"], "superseded")
+                self.assertEqual(by_source["original"]["superseded_by"], [
+                    ledger_cli.event_id("cc", "correction")])
+                self.assertEqual(by_source["reply"]["fact_status"], "current_or_unresolved")
+                self.assertEqual(by_source["unlinked"]["fact_status"], "current_or_unresolved")
+                self.assertLess(
+                    [row["source_id"] for row in result].index("correction"),
+                    [row["source_id"] for row in result].index("original"),
+                )
+                self.assertEqual(db.execute(
+                    "SELECT content FROM events WHERE event_id=?", (original_id,)
+                ).fetchone()["content"], "alpha room is blue")
+            finally:
+                db.close()
+
     def test_ascii_case_variants_rank_full_match_above_newer_partial_match(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="synthetic-recall-", dir=root) as directory:

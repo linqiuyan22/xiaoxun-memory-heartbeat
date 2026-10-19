@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Iterable
 
 from selector_filters import classify_row as _selector_classify  # noqa: F401
+from supersession import index as _supersession_index
 
 
 ROOT = Path(__file__).resolve().parent
@@ -292,6 +293,7 @@ class MemoryGateway:
         if until_dt is not None:
             rows = [row for row in rows if self._dt(row.ts) < until_dt]
         rows, _dropped = _filter_context(rows)
+        superseded_by = _supersession_index(rows)
         scored = []
         ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
                                     "abcdefghijklmnopqrstuvwxyz")
@@ -302,7 +304,10 @@ class MemoryGateway:
             if query.strip() and query.strip() in row.content:
                 score += 3
             actor_score = 1 if row.actor in ("yanyan", "xiaoxun") else 0
-            scored.append((score, actor_score, row.ts, row))
+            # Only a declared ledger correction makes an earlier event stale.
+            # Recency and reply_to intentionally carry no such authority.
+            current_score = 0 if row.event_id in superseded_by else 1
+            scored.append((current_score, score, actor_score, row.ts, row))
         # memory_append writes the live journal rather than the imported event
         # ledger. Include it in unrestricted searches so the next turn can
         # find what the previous turn wrote.
@@ -316,9 +321,9 @@ class MemoryGateway:
                     score += 3
                 if score:
                     actor_score = 1 if row.actor in ("yanyan", "xiaoxun") else 0
-                    scored.append((score, actor_score, row.ts, row))
-        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-        return self._dedupe(row for _, _, _, row in scored)[:int(limit)]
+                    scored.append((1, score, actor_score, row.ts, row))
+        scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+        return self._dedupe(row for _, _, _, _, row in scored)[:int(limit)]
 
     def get_event(self, event_id: str) -> Event | None:
         """Read one canonical event by stable ID; never accepts a file path."""

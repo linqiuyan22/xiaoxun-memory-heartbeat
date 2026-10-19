@@ -77,6 +77,40 @@ class MemoryGatewaySearchTest(unittest.TestCase):
                         result = gateway.search_events(query, limit=2)
                         self.assertEqual([row.source_id for row in result], ["full", "partial"])
 
+    def test_explicit_correction_ranks_before_old_fact_without_erasing_it(self):
+        with tempfile.TemporaryDirectory(prefix="synthetic-gateway-") as directory:
+            db_path = Path(directory) / "synthetic.db"
+            original_id = ledger_cli.event_id("cc", "original")
+            rows = [
+                dict(source="cc", source_id="original", conversation_id="synthetic-thread",
+                     ts="2026-01-01T00:00:00Z", actor="yanyan", kind="message",
+                     visibility="normal", content="alpha room is blue"),
+                dict(source="cc", source_id="reply", conversation_id="synthetic-thread",
+                     ts="2026-01-02T00:00:00Z", actor="yanyan", kind="message",
+                     visibility="normal", content="alpha room needs repainting", reply_to="original"),
+                dict(source="cc", source_id="correction", conversation_id="synthetic-thread",
+                     ts="2026-01-03T00:00:00Z", actor="yanyan", kind="message",
+                     visibility="normal", content="alpha correction: room is green",
+                     metadata={"supersedes_event_ids": [original_id]}),
+            ]
+            db = ledger_cli.connect(db_path)
+            try:
+                self.assertEqual(ledger_cli.ingest_rows(db, rows)["added"], 3)
+                self.assertEqual(db.execute(
+                    "SELECT content FROM events WHERE event_id=?", (original_id,)
+                ).fetchone()["content"], "alpha room is blue")
+            finally:
+                db.close()
+            gateway = MemoryGateway(db_path=db_path)
+            with patch("memory_gateway._filter_context", side_effect=lambda items: (list(items), 0)), \
+                    patch.object(MemoryGateway, "_journal_events", return_value=[]):
+                result = gateway.search_events("alpha room", limit=6)
+            self.assertEqual({row.source_id for row in result}, {"original", "reply", "correction"})
+            self.assertLess(
+                [row.source_id for row in result].index("correction"),
+                [row.source_id for row in result].index("original"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
