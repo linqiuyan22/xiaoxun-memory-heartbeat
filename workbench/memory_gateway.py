@@ -17,6 +17,8 @@ import json
 import os
 import re
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -67,12 +69,72 @@ class Event:
     metadata_json: str = ""
 
 
+class SessionRecallLedger:
+    """Small in-memory record of evidence already surfaced in one chat.
+
+    This is deliberately a *projection*, not another memory store: it keeps
+    only a caller-provided session key and stable event IDs.  It is never
+    written to the ledger, so closing/restarting the service clears it.  A
+    previously used event remains available as a fallback when a search has
+    no fresh evidence; avoiding repetition must not hide the only source.
+    """
+
+    def __init__(self, *, max_sessions: int = 128, max_events: int = 48):
+        self.max_sessions = max(1, int(max_sessions))
+        self.max_events = max(1, int(max_events))
+        self._sessions: OrderedDict[str, OrderedDict[str, None]] = OrderedDict()
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _key(session_id: str | None) -> str | None:
+        if session_id is None:
+            return None
+        if not isinstance(session_id, str):
+            raise ValueError("recall_session_id must be a string")
+        value = session_id.strip()
+        if not value or len(value) > 120 or any(char in value for char in "\r\n\x00"):
+            raise ValueError("recall_session_id must be a short single-line string")
+        return value
+
+    def reorder(self, session_id: str | None, rows: list[Event]) -> list[Event]:
+        """Prefer unused evidence for this chat, keeping used evidence as fallback."""
+        key = self._key(session_id)
+        if key is None:
+            return list(rows)
+        with self._lock:
+            seen = self._sessions.get(key, OrderedDict())
+            fresh = [row for row in rows if row.event_id not in seen]
+            repeated = [row for row in rows if row.event_id in seen]
+            # Do not pad a useful fresh result with evidence the chat has
+            # already received.  Only fall back to repeats when there is no
+            # fresh source at all; otherwise a wide MCP result would repeat
+            # the same top records on every request.
+            return fresh if fresh else repeated
+
+    def mark_returned(self, session_id: str | None, rows: Iterable[Event]) -> None:
+        key = self._key(session_id)
+        if key is None:
+            return
+        with self._lock:
+            seen = self._sessions.pop(key, OrderedDict())
+            for row in rows:
+                seen.pop(row.event_id, None)
+                seen[row.event_id] = None
+            while len(seen) > self.max_events:
+                seen.popitem(last=False)
+            self._sessions[key] = seen
+            while len(self._sessions) > self.max_sessions:
+                self._sessions.popitem(last=False)
+
+
 class MemoryGateway:
     """Read-only access to raw events and explicitly named current files."""
 
-    def __init__(self, db_path: Path | str = DEFAULT_DB, file_aliases: dict[str, Path] | None = None):
+    def __init__(self, db_path: Path | str = DEFAULT_DB, file_aliases: dict[str, Path] | None = None,
+                 recall_ledger: SessionRecallLedger | None = None):
         self.db_path = Path(db_path)
         self.file_aliases = dict(file_aliases or FILE_ALIASES)
+        self.recall_ledger = recall_ledger or SessionRecallLedger()
 
     def _connect(self) -> sqlite3.Connection:
         if not self.db_path.exists():
@@ -242,6 +304,7 @@ class MemoryGateway:
         since: str | None = None,
         until: str | None = None,
         limit: int = 12,
+        recall_session_id: str | None = None,
     ) -> list[Event]:
         """Search original events, with optional provenance constraints.
 
@@ -323,7 +386,10 @@ class MemoryGateway:
                     actor_score = 1 if row.actor in ("yanyan", "xiaoxun") else 0
                     scored.append((1, score, actor_score, row.ts, row))
         scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
-        return self._dedupe(row for _, _, _, _, row in scored)[:int(limit)]
+        ranked = self._dedupe(row for _, _, _, _, row in scored)
+        selected = self.recall_ledger.reorder(recall_session_id, ranked)[:int(limit)]
+        self.recall_ledger.mark_returned(recall_session_id, selected)
+        return selected
 
     def get_event(self, event_id: str) -> Event | None:
         """Read one canonical event by stable ID; never accepts a file path."""

@@ -236,10 +236,13 @@ class MemoryService:
                                  "events": [_safe_event(row) for row in rows],
                                  "count": len(rows)}, "events")
 
-    def memory_search(self, query: str, source: str | None = None) -> dict[str, Any]:
+    def memory_search(self, query: str, source: str | None = None,
+                      recall_session_id: str | None = None) -> dict[str, Any]:
         args = {"query": query}
         if source is not None:
             args["source"] = source
+        if recall_session_id is not None:
+            args["recall_session_id"] = recall_session_id
         return json.loads(self.broker.execute("memory_search", self.broker.validate("memory_search", args)))
 
     def memory_get(self, alias: str | None = None, max_chars: int = 5000,
@@ -461,7 +464,7 @@ class MemoryService:
         if name == "breath":
             return self.breath(args.get("limit", 12))
         if name == "memory_search":
-            return self.memory_search(args.get("query"), args.get("source"))
+            return self.memory_search(args.get("query"), args.get("source"), args.get("recall_session_id"))
         if name in {"memory_get", "memory_read_file"}:
             return self.memory_get(args.get("alias"), args.get("max_chars", 5000), args.get("event_id"))
         if name == "memory_briefing":
@@ -509,7 +512,8 @@ TOOLS = [
             {"limit": {"type": "integer", "minimum": 1, "maximum": 80}}),
     _schema("memory_search", "Search bounded original memory events.",
             {"query": {"type": "string", "maxLength": 200},
-             "source": {"type": "string", "enum": ["cc", "telegram", "self"]}}, ["query"]),
+             "source": {"type": "string", "enum": ["cc", "telegram", "self"]},
+             "recall_session_id": {"type": "string", "maxLength": 120}}, ["query"]),
     _schema("memory_get", "Read one stable event or named whitelisted memory projection.",
             {"event_id": {"type": "string", "maxLength": 160},
              "alias": {"type": "string", "enum": list(FILE_ALIASES)},

@@ -4,7 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import ledger_cli
+from mcp_adapter import MemoryService
 from memory_gateway import MemoryGateway
+from tool_broker import ToolBroker
 
 
 class MemoryGatewaySearchTest(unittest.TestCase):
@@ -110,6 +112,61 @@ class MemoryGatewaySearchTest(unittest.TestCase):
                 [row.source_id for row in result].index("correction"),
                 [row.source_id for row in result].index("original"),
             )
+
+    def test_session_recall_prefers_unseen_evidence_then_falls_back(self):
+        with tempfile.TemporaryDirectory(prefix="synthetic-session-recall-") as directory:
+            db_path = Path(directory) / "synthetic.db"
+            rows = [
+                dict(source="cc", source_id="newer", conversation_id="synthetic-thread",
+                     ts="2026-01-02T00:00:00Z", actor="yanyan", kind="message",
+                     visibility="normal", content="alpha evidence newer"),
+                dict(source="cc", source_id="older", conversation_id="synthetic-thread",
+                     ts="2026-01-01T00:00:00Z", actor="yanyan", kind="message",
+                     visibility="normal", content="alpha evidence older"),
+            ]
+            db = ledger_cli.connect(db_path)
+            try:
+                self.assertEqual(ledger_cli.ingest_rows(db, rows)["added"], 2)
+            finally:
+                db.close()
+            gateway = MemoryGateway(db_path=db_path)
+            with patch("memory_gateway._filter_context", side_effect=lambda items: (list(items), 0)), \
+                    patch.object(MemoryGateway, "_journal_events", return_value=[]):
+                first = gateway.search_events("alpha", limit=1, recall_session_id="chat-a")
+                second = gateway.search_events("alpha", limit=2, recall_session_id="chat-a")
+                other_chat = gateway.search_events("alpha", limit=1, recall_session_id="chat-b")
+                fallback = gateway.search_events("alpha", limit=2, recall_session_id="chat-a")
+            self.assertEqual([row.source_id for row in first], ["newer"])
+            self.assertEqual([row.source_id for row in second], ["older"])
+            self.assertEqual([row.source_id for row in other_chat], ["newer"])
+            self.assertEqual([row.source_id for row in fallback], ["newer", "older"])
+
+    def test_mcp_search_forwards_the_optional_session_id(self):
+        with tempfile.TemporaryDirectory(prefix="synthetic-mcp-session-") as directory:
+            root = Path(directory)
+            db_path = root / "synthetic.db"
+            db = ledger_cli.connect(db_path)
+            try:
+                ledger_cli.ingest_rows(db, [
+                    dict(source="cc", source_id="first", conversation_id="synthetic-thread",
+                         ts="2026-01-02T00:00:00Z", actor="yanyan", kind="message",
+                         visibility="normal", content="alpha first"),
+                    dict(source="cc", source_id="second", conversation_id="synthetic-thread",
+                         ts="2026-01-01T00:00:00Z", actor="yanyan", kind="message",
+                         visibility="normal", content="alpha second"),
+                ])
+            finally:
+                db.close()
+            gateway = MemoryGateway(db_path=db_path)
+            broker = ToolBroker(gateway, audit_file=root / "audit.jsonl", journal_file=root / "journal.jsonl")
+            service = MemoryService(gateway=gateway, broker=broker, ledger_db=db_path,
+                                    fragment_root=root / "fragments", memory_root=root / "memory")
+            with patch("memory_gateway._filter_context", side_effect=lambda items: (list(items), 0)), \
+                    patch.object(MemoryGateway, "_journal_events", return_value=[]), \
+                    patch.object(gateway, "search_events", wraps=gateway.search_events) as search:
+                first = service.memory_search("alpha", recall_session_id="mcp-chat")
+            self.assertEqual(first["events"][0]["source_id"], "first")
+            self.assertEqual(search.call_args.kwargs["recall_session_id"], "mcp-chat")
 
 
 if __name__ == "__main__":

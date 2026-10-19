@@ -98,6 +98,7 @@ TOOL_SPECS = [
                 "properties": {
                     "query": {"type": "string", "description": "search keywords"},
                     "source": {"type": "string", "description": "cc | telegram (optional)"},
+                    "recall_session_id": {"type": "string", "description": "optional stable ID for this chat; avoids repeating already surfaced evidence"},
                 },
                 "required": ["query"],
             },
@@ -229,7 +230,14 @@ class ToolBroker:
             src = args.get("source")
             if src is not None and src not in ("cc", "telegram", "self"):
                 raise ValueError("source must be cc, telegram, or self")
-            return {"query": q.strip(), "source": src}
+            session_id = args.get("recall_session_id")
+            if session_id is not None:
+                if not isinstance(session_id, str) or not session_id.strip() or len(session_id.strip()) > 120:
+                    raise ValueError("recall_session_id must be a short non-empty string")
+                if any(char in session_id for char in "\r\n\x00"):
+                    raise ValueError("recall_session_id must be single-line")
+                session_id = session_id.strip()
+            return {"query": q.strip(), "source": src, "recall_session_id": session_id}
         if name == "memory_read_file":
             alias = args.get("alias")
             if alias not in FILE_ALIASES:
@@ -295,7 +303,8 @@ class ToolBroker:
     def execute(self, name: str, args: dict, cap: int | None = None) -> str:
         budget = min(RESULT_BUDGET_CHARS, int(cap)) if cap else RESULT_BUDGET_CHARS
         if name == "memory_search":
-            rows = self.gateway.search_events(args["query"], source=args.get("source"), limit=12)
+            rows = self.gateway.search_events(args["query"], source=args.get("source"), limit=12,
+                                              recall_session_id=args.get("recall_session_id"))
             kept = []
             for r in rows:
                 d = asdict(r)
