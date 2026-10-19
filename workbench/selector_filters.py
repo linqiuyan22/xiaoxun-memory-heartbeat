@@ -30,8 +30,15 @@ COMPACT_MARKERS = (
     "compact summary",
 )
 
+AGENT_HANDOFF_MARKERS = (
+    "another claude session sent a message:",
+    "<agent-message from=",
+    "[subagent hand-back]",
+    "the text below is the final report of a subagent",
+)
+
 HARD_EXCLUDE_REASONS = ("subagent_log", "compaction_summary", "quarantine",
-                        "legacy_derived", "unapproved_candidate")
+                        "legacy_derived", "unapproved_candidate", "agent_handoff")
 
 APPROVED_STATUSES = ("approved", "approved_policy")
 
@@ -97,6 +104,11 @@ def classify_row(row, quarantine=None) -> dict:
         exclude.append("subagent_log")
     if any(marker in lower for marker in COMPACT_MARKERS):
         exclude.append("compaction_summary")
+    # Imported Claude transcripts can preserve a harness wrapper around a
+    # sub-agent hand-back as if it were a user message. Preserve it for audit
+    # but never let it masquerade as conversation evidence.
+    if any(marker in lower for marker in AGENT_HANDOFF_MARKERS):
+        exclude.append("agent_handoff")
     if source_id in q["source_ids"] or event_id in q["event_ids"]:
         exclude.append("quarantine")
     if visibility == "derived" or raw_visibility == "derived":
